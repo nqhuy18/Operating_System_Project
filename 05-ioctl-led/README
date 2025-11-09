@@ -1,0 +1,8 @@
+This example how to use ioctl to config times and delay_time from use_space to kernel_space
+
+how to use:
+make all
+insmod ioctl_example.ko
+
+Terminal: gcc -o user user.c
+        ./user
