@@ -18,7 +18,7 @@ static struct gpio_desc *led;
 #define IO_OFFSET 0
 
 #define DEVICE		5
-#define AUTHOR		"Phu Luu An luuanphu@gmail.com"
+#define AUTHOR		"NQH nqhuy@gmail.com"
 #define DESC		"A example character device driver"
 #define DEVICE_NAME     "char_dd"
 
