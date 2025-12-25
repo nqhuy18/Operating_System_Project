@@ -34,29 +34,11 @@ static struct i2c_client *mpu_client;
 dev_t devNr = 0;
 static struct class *dev_class;
 static struct cdev mpu_cdev;
-struct kobject *kobj_ref;
 
-unsigned char *kernel_buffer;
 
 static mpu6050 mpu_info;
 struct xyz_data acc_read;
 unsigned int fifo_count;
-
-ssize_t sysfs_acc_show(struct kobject *kobj, struct kobj_attribute *attr,
-                       char *buf);
-ssize_t sysfs_fifo_count_read(struct kobject *kobj, struct kobj_attribute *attr,
-                              char *buf);
-
-struct kobj_attribute mpu_acc_attr = __ATTR(xyz_data, 0660, sysfs_acc_show,
-                                            NULL);
-struct kobj_attribute fifo_count_attr = __ATTR(fifo_count, 0660,
-                                               sysfs_fifo_count_read, NULL);
-
-static struct attribute *dev_attrs[] = {
-  &mpu_acc_attr.attr,
-  &fifo_count_attr.attr,
-  NULL,
-};
 
 /**
  * MPU_Write_Reg() - Writes to a register.
@@ -205,6 +187,7 @@ static long mpu_ioctl(struct file *file, unsigned int cmd, unsigned long arg) { 
         pr_err("Invalid AFS_SEL value");
       }
     }
+    break;
 
   case READ_TEMPERATURE:
     mpu_read_temperature(&tmp);
@@ -235,25 +218,6 @@ static long mpu_ioctl(struct file *file, unsigned int cmd, unsigned long arg) { 
     break;
   }
   return 0;
-}
-
-ssize_t sysfs_fifo_count_read(struct kobject *kobj, struct kobj_attribute *attr,
-                              char *buf) {
-  unsigned char test_buf[2];
-  char outbuf[10];
-  MPU_Burst_Read(FIFO_COUNT_H, 2, test_buf);
-  fifo_count = (test_buf[0] << 8) + test_buf[1];
-  snprintf(outbuf, sizeof(outbuf), "0x%X", fifo_count);
-  return snprintf(buf, sizeof(outbuf), "%s", outbuf);
-}
-
-ssize_t sysfs_acc_show(struct kobject *kobj, struct kobj_attribute *attr,
-                       char *buf) {
-  unsigned char output_data[20];
-  mpu_read_accelerometer_axis(&acc_read);
-  snprintf(output_data, sizeof(output_data), "%d %d %d", acc_read.x,
-           acc_read.y, acc_read.z);
-  return snprintf(buf, sizeof(output_data), "%s", output_data);
 }
 
 /* Create the i2c_board_info structure and create a device using that*/ 
@@ -349,11 +313,12 @@ static struct file_operations mpu_fops = {
 };
 
 static int __init mpu_init(void) {
+  // Xin cấp phát mã số thiết bị 
   if (alloc_chrdev_region(&devNr, 0, 1, MPU_NAME) < 0) {
     pr_err("Failed to allocate chr dev number");
     return -1;
   }
-
+  // Gán các hàm tự định nghĩa
   cdev_init(&mpu_cdev, &mpu_fops);
   if (cdev_add(&mpu_cdev, devNr, 1) < 0) {
     pr_err("Could not add cdev.");
@@ -371,16 +336,7 @@ static int __init mpu_init(void) {
     goto r_device;
   }
 
-  kobj_ref = kobject_create_and_add(MPU_NAME, fs_kobj); /* sys/fs/mpu6050 */
-  if (sysfs_create_file(kobj_ref, dev_attrs[0]) < 0) {
-    pr_err("Failed to create kobject!");
-    goto r_sysfs;
-  }
-  if (sysfs_create_file(kobj_ref, dev_attrs[1]) < 0) {
-    pr_err("Failed to create kobject!");
-    goto r_sysfs;
-  }
-
+  // Yêu cầu lấy quyền điều khiển một Bus I2C cụ thể
   mpu_adapter = i2c_get_adapter(I2C_BUS);
   if (mpu_adapter != NULL) {
     mpu_client = i2c_new_client_device(mpu_adapter, &mpu_board_info);
@@ -390,16 +346,7 @@ static int __init mpu_init(void) {
   }
   i2c_put_adapter(mpu_adapter);
 
-  if ((kernel_buffer = kmalloc(MEM_SIZE, GFP_KERNEL)) == 0) {
-    pr_err("Cannot allocate memory in kernel\n");
-    goto r_device;
-  }
-
   return 0;
-
-r_sysfs:
-  kobject_put(kobj_ref);
-  sysfs_remove_file(fs_kobj, &mpu_acc_attr.attr);
 r_device:
   class_destroy(dev_class);
 r_class:
@@ -408,10 +355,6 @@ r_class:
 }
 
 static void __exit mpu_exit(void) {
-  kfree(kernel_buffer);
-  kobject_put(kobj_ref);
-  sysfs_remove_file(kernel_kobj, dev_attrs[0]);
-  sysfs_remove_file(kernel_kobj, dev_attrs[1]);
   device_destroy(dev_class, devNr);
   class_destroy(dev_class);
   unregister_chrdev_region(devNr, 1);
