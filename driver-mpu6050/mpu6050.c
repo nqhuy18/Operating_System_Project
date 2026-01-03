@@ -6,6 +6,9 @@
 #include <linux/ioctl.h>
 #include <linux/kobject.h>
 #include <linux/module.h>
+#include <linux/delay.h>
+#include <linux/sched.h>
+#include <linux/mutex.h>
 #include "mpu6050.h"
 
 #define MPU_NAME "mpu6050"
@@ -40,6 +43,7 @@ static mpu6050 mpu_info;
 struct xyz_data acc_read;
 unsigned int fifo_count;
 
+static DEFINE_MUTEX(mpu6050_mutex);
 /**
  * MPU_Write_Reg() - Writes to a register.
  * @reg: Register that will be written.
@@ -64,24 +68,48 @@ static int MPU_Write_Reg(unsigned char reg, unsigned int value) {
  *
  * Return: bytes read.
  */
-static int MPU_Read_Reg(unsigned char reg, unsigned char *rec_buf) {
-  struct i2c_msg msg[2];
-  int ret;
 
-  msg[0].addr = mpu_client->addr;
-  msg[0].flags = 0;
-  msg[0].len = 1;
-  msg[0].buf = &reg;
-  msg[1].addr = mpu_client->addr;
-  msg[1].flags = I2C_M_RD;
-  msg[1].len = 1;
-  msg[1].buf = rec_buf;
+// static int MPU_Read_Reg(unsigned char reg, unsigned char *rec_buf) {
+//   struct i2c_msg msg[2];
+//   int ret;
 
-  ret = i2c_transfer(mpu_client->adapter, msg, 2);
-  if (ret < 0) {
-    pr_err("Erro reading register 0x%X", reg);
-  }
-  return ret;
+//   msg[0].addr = mpu_client->addr;
+//   msg[0].flags = 0;
+//   msg[0].len = 1;
+//   msg[0].buf = &reg;
+//   msg[1].addr = mpu_client->addr;
+//   msg[1].flags = I2C_M_RD;
+//   msg[1].len = 1;
+//   msg[1].buf = rec_buf;
+
+//   ret = i2c_transfer(mpu_client->adapter, msg, 2);
+//   if (ret < 0) {
+//     pr_err("Erro reading register 0x%X", reg);
+//   }
+//   return ret;
+// }
+
+/**
+ * MPU_Read_Reg_RACE() - Read a single register (UNSAFE).
+ */
+static int MPU_Read_Reg(unsigned char reg, unsigned char *rec_buf)
+{
+    int ret;
+    /* Step 1: write register address */
+    ret = i2c_master_send(mpu_client, &reg, 1);
+    if (ret < 0) {
+        pr_err("Error writing register address 0x%X\n", reg);
+        return ret;
+    }
+
+    /* Step 2: read register data */
+    ret = i2c_master_recv(mpu_client, rec_buf, 1);
+    if (ret < 0) {
+        pr_err("Error reading register 0x%X\n", reg);
+        return ret;
+    }
+
+    return ret;
 }
 
 /**
@@ -92,30 +120,65 @@ static int MPU_Read_Reg(unsigned char reg, unsigned char *rec_buf) {
  *
  * Return: bytes sent and received
  */
-static int MPU_Burst_Read(unsigned char start_reg, unsigned int length,
-                          unsigned char *rec_buffer) {
-  int ret;
-  struct i2c_msg msg[2];
+// static int MPU_Burst_Read(unsigned char start_reg, unsigned int length,
+//                           unsigned char *rec_buffer) {
+//   int ret;
+//   struct i2c_msg msg[2];
 
-  msg[0].addr = mpu_client->addr;
-  msg[0].flags = 0;
-  msg[0].len = 1;
-  msg[0].buf = &start_reg;
-  msg[1].addr = mpu_client->addr;
-  msg[1].flags = I2C_M_RD;
-  msg[1].len = length;
-  msg[1].buf = rec_buffer;
-  ret = i2c_transfer(mpu_client->adapter, msg, 2);
-  if (ret < 0) {
-    pr_err("Erro burst reading register 0x%X\n", start_reg);
-  }
-  return ret;
+//   msg[0].addr = mpu_client->addr;
+//   msg[0].flags = 0;
+//   msg[0].len = 1;
+//   msg[0].buf = &start_reg;
+//   msg[1].addr = mpu_client->addr;
+//   msg[1].flags = I2C_M_RD;
+//   msg[1].len = length;
+//   msg[1].buf = rec_buffer;
+//   ret = i2c_transfer(mpu_client->adapter, msg, 2);
+//   if (ret < 0) {
+//     pr_err("Erro burst reading register 0x%X\n", start_reg);
+//   }
+//   return ret;
+// }
+
+/**
+ * MPU_Burst_Read_RACE() - Read multiple registers (UNSAFE).
+ */
+unsigned char curr_reg;
+static int MPU_Burst_Read(unsigned char start_reg,
+                          unsigned int length,
+                          unsigned char *rec_buffer)
+{
+    int ret;
+    /* Step 1: write start register */
+    mutex_lock(&mpu6050_mutex);
+    curr_reg = start_reg;
+    pr_info("[PID=%d] LOCKED MUTEX\n", current->pid);
+    ret = i2c_master_send(mpu_client, &start_reg, 1);
+    if (ret < 0) {
+        pr_err("Error writing start register 0x%X\n", start_reg);
+        return ret;
+    }
+    pr_info("[PID=%d] WRITE start_reg=0x%02X\n",
+            current->pid, curr_reg);
+    /* Step 2: read burst data */
+    pr_info("[PID=%d] READ, start_reg=0x%02X\n",
+            current->pid, curr_reg);
+    ret = i2c_master_recv(mpu_client, rec_buffer, length);
+    if (ret < 0) {
+        pr_err("Error burst reading register 0x%X\n", start_reg);
+        return ret;
+    }
+    mutex_unlock(&mpu6050_mutex);
+    pr_info("[PID=%d] UNLOCKED MUTEX\n", current->pid);
+    pr_info("\n");
+    return ret;
 }
 
 void mpu_read_temperature(int16_t *temp) {
   unsigned char buf[2];
   MPU_Burst_Read(TEMP_ADDR, 2, buf);
   *temp = (buf[0] << 8) + buf[1];
+  //pr_info("MPU6050 temperature raw = %d\n", *temp);
 }
 
 void mpu_read_accelerometer_axis(struct xyz_data *acc) {
@@ -124,6 +187,8 @@ void mpu_read_accelerometer_axis(struct xyz_data *acc) {
   acc->x = (test_buf[0] << 8) + test_buf[1];
   acc->y = (test_buf[2] << 8) + test_buf[3];
   acc->z = (test_buf[4] << 8) + test_buf[5];
+  //pr_info("MPU6050 accel raw: X=%d Y=%d Z=%d\n",
+  //          acc->x, acc->y, acc->z);
 }
 
 void mpu_read_fifo_count(int *count) {
@@ -313,12 +378,11 @@ static struct file_operations mpu_fops = {
 };
 
 static int __init mpu_init(void) {
-  // Xin cấp phát mã số thiết bị 
   if (alloc_chrdev_region(&devNr, 0, 1, MPU_NAME) < 0) {
     pr_err("Failed to allocate chr dev number");
     return -1;
   }
-  // Gán các hàm tự định nghĩa
+
   cdev_init(&mpu_cdev, &mpu_fops);
   if (cdev_add(&mpu_cdev, devNr, 1) < 0) {
     pr_err("Could not add cdev.");
@@ -336,7 +400,6 @@ static int __init mpu_init(void) {
     goto r_device;
   }
 
-  // Yêu cầu lấy quyền điều khiển một Bus I2C cụ thể
   mpu_adapter = i2c_get_adapter(I2C_BUS);
   if (mpu_adapter != NULL) {
     mpu_client = i2c_new_client_device(mpu_adapter, &mpu_board_info);
@@ -345,6 +408,7 @@ static int __init mpu_init(void) {
     }
   }
   i2c_put_adapter(mpu_adapter);
+
 
   return 0;
 r_device:

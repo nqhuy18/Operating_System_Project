@@ -7,11 +7,10 @@
 #include <sys/ioctl.h>
 #include <unistd.h>
 #include <stdlib.h>
-
+#include <math.h>
 #include "mpu6050.h"     // chứa READ_TEMPERATURE, MPU_INFO, READ_ACCELEROMETER, ...
 
 #define DEV_PATH "/dev/mpu6050"
-
 static void print_menu(void)
 {
     printf("\n=========== MPU6050 CONTROL MENU ===========\n");
@@ -60,28 +59,72 @@ int main(void)
         case 1:   // ====================== READ TEMPERATURE =====================
         {
             int16_t temp_raw = 0;
-            ret = ioctl(fd, READ_TEMPERATURE, &temp_raw);
-            if (ret < 0) {
-                perror("ioctl READ_TEMPERATURE");
-            } else {
-                float temp_c = (temp_raw / 340.0f) + 36.53f;
-                printf("Temperature raw = %d, Temp = %.2f C\n", temp_raw, temp_c);
+            while (1) {
+                ret = ioctl(fd, READ_TEMPERATURE, &temp_raw);
+                if (ret < 0) {
+                    perror("ioctl READ_TEMPERATURE");
+                } else {
+                    float temp_c = (temp_raw / 340.0f) + 36.53f;
+                    printf("Temperature raw = %d, Temp = %.2f C\n", temp_raw, temp_c);
+                }
+                    fflush(stdout);
+
+                usleep(10000); // 200 ms
             }
             break;
         }
 
-        case 2:   // ====================== READ ACCEL 1 TIME =====================
-        {
-            xyz_data acc;
-            ret = ioctl(fd, READ_ACCELEROMETER, &acc);
-            if (ret < 0) {
-                perror("ioctl READ_ACCELEROMETER");
-            } else {
-                printf("Accel: X=%d, Y=%d, Z=%d\n", acc.x, acc.y, acc.z);
-            }
-            break;
-        }
+	case 2:   // ===== READ ACCEL -> ANGLE -> ORIENTATION =====
+{
+    xyz_data acc;
+    while(1)
+    {
+    ret = ioctl(fd, READ_ACCELEROMETER, &acc);
+    if (ret < 0) {
+        perror("ioctl READ_ACCELEROMETER");
+        break;
+    }
 
+    // 1️⃣ Chuẩn hoá (giả sử ±2g, sensitivity = 16384 LSB/g)
+    float ax = acc.x / 8192.0f; 
+    float ay = acc.y / 8192.0f;
+    float az = acc.z / 8192.0f;
+
+    float pitch = atan2(-ax, sqrt(ay * ay + az * az)) * 180.0 / M_PI;
+    float roll = atan2(ay, az) * 180.0 / M_PI;
+
+    // printf("Pitch=%.1f°\n", pitch);
+    const char *dir_pitch = "";
+    const char *dir_roll  = "";
+
+    /* Pitch */
+    if (pitch < -5)
+        dir_pitch = "UP";
+    else if (pitch > 5)
+        dir_pitch = "DOWN";
+
+    /* Roll */
+    if (roll < 80)
+        dir_roll = "LEFT";
+    else if (roll > 100)
+        dir_roll = "RIGHT";
+
+    /* In kết quả */
+    if (dir_pitch[0] && dir_roll[0])
+        printf("%s %s\n", dir_pitch, dir_roll);
+    else if (dir_pitch[0])
+        printf("%s\n", dir_pitch);
+    else if (dir_roll[0])
+        printf("%s\n", dir_roll);
+    else
+        printf("CENTER\n");
+    fflush(stdout);
+
+    usleep(10000); // 200 ms
+    }
+    break;
+}
+/*
         case 3:   // ====================== READ ACCEL N TIMES =====================
         {
             int n;
@@ -104,7 +147,7 @@ int main(void)
             }
             break;
         }
-
+*/
         case 4:   // ====================== READ MPU INFO =====================
         {
             mpu6050 info;
@@ -113,7 +156,7 @@ int main(void)
                 perror("ioctl MPU_INFO");
             } else {
                 printf("MPU Info:\n");
-                printf("  sensitivity = %.2f\n", info.sensitivity);
+               // printf("  sensitivity = %.2f\n", info.sensitivity);
                 printf("  sample_rate = %d\n", info.sample_rate);
             }
             break;
