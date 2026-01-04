@@ -13,7 +13,7 @@
 
 #define MPU_NAME "mpu6050"
 #define MEM_SIZE 1024
-#define MPU_ADDR 0x68
+#define MPU6050_WHOAMI_VALUE 0x68
 #define WHO_AM_I_ADDR 0x75
 #define CONFIG 0x1A             // Configure FSYNC pin and DLPF
 #define USER_CTRL 0x6A          // User control register
@@ -30,8 +30,6 @@
 
 const uint32_t sensitivity_afssel[4] = {16384, 8192, 4096, 2048};
 
-static int I2C_BUS = 1;
-static struct i2c_adapter *mpu_adapter;
 static struct i2c_client *mpu_client;
 
 dev_t devNr = 0;
@@ -69,26 +67,6 @@ static int MPU_Write_Reg(unsigned char reg, unsigned int value) {
  * Return: bytes read.
  */
 
-// static int MPU_Read_Reg(unsigned char reg, unsigned char *rec_buf) {
-//   struct i2c_msg msg[2];
-//   int ret;
-
-//   msg[0].addr = mpu_client->addr;
-//   msg[0].flags = 0;
-//   msg[0].len = 1;
-//   msg[0].buf = &reg;
-//   msg[1].addr = mpu_client->addr;
-//   msg[1].flags = I2C_M_RD;
-//   msg[1].len = 1;
-//   msg[1].buf = rec_buf;
-
-//   ret = i2c_transfer(mpu_client->adapter, msg, 2);
-//   if (ret < 0) {
-//     pr_err("Erro reading register 0x%X", reg);
-//   }
-//   return ret;
-// }
-
 /**
  * MPU_Read_Reg_RACE() - Read a single register (UNSAFE).
  */
@@ -96,6 +74,7 @@ static int MPU_Read_Reg(unsigned char reg, unsigned char *rec_buf)
 {
     int ret;
     /* Step 1: write register address */
+    mutex_lock(&mpu6050_mutex);
     ret = i2c_master_send(mpu_client, &reg, 1);
     if (ret < 0) {
         pr_err("Error writing register address 0x%X\n", reg);
@@ -108,7 +87,7 @@ static int MPU_Read_Reg(unsigned char reg, unsigned char *rec_buf)
         pr_err("Error reading register 0x%X\n", reg);
         return ret;
     }
-
+    mutex_unlock(&mpu6050_mutex);
     return ret;
 }
 
@@ -120,25 +99,6 @@ static int MPU_Read_Reg(unsigned char reg, unsigned char *rec_buf)
  *
  * Return: bytes sent and received
  */
-// static int MPU_Burst_Read(unsigned char start_reg, unsigned int length,
-//                           unsigned char *rec_buffer) {
-//   int ret;
-//   struct i2c_msg msg[2];
-
-//   msg[0].addr = mpu_client->addr;
-//   msg[0].flags = 0;
-//   msg[0].len = 1;
-//   msg[0].buf = &start_reg;
-//   msg[1].addr = mpu_client->addr;
-//   msg[1].flags = I2C_M_RD;
-//   msg[1].len = length;
-//   msg[1].buf = rec_buffer;
-//   ret = i2c_transfer(mpu_client->adapter, msg, 2);
-//   if (ret < 0) {
-//     pr_err("Erro burst reading register 0x%X\n", start_reg);
-//   }
-//   return ret;
-// }
 
 /**
  * MPU_Burst_Read_RACE() - Read multiple registers (UNSAFE).
@@ -285,17 +245,13 @@ static long mpu_ioctl(struct file *file, unsigned int cmd, unsigned long arg) { 
   return 0;
 }
 
-/* Create the i2c_board_info structure and create a device using that*/ 
-
-static struct i2c_board_info mpu_board_info = {
-  I2C_BOARD_INFO(MPU_NAME, MPU_ADDR),
-};
 
 /* Create the i2c_device_id for your slave device and register that. */
-static struct i2c_device_id mpu_id[] = {
-  {MPU_NAME, 0}, {}
+static const struct of_device_id mpu_of_match[] = {
+    { .compatible = "invensense,mpu6050" },
+    { }
 };
-MODULE_DEVICE_TABLE(i2c, mpu_id);
+MODULE_DEVICE_TABLE(of, mpu_of_match);
 
 /*
 ** This function getting called when the slave has been found
@@ -306,8 +262,9 @@ static int mpu_probe(struct i2c_client *client,
   unsigned char who_am_i;
   accel_config_g = ACCEL_CONFIG_AFS_4G;
   pr_info("Initializing driver");
+  mpu_client = client;
   MPU_Read_Reg(WHO_AM_I_ADDR, &who_am_i);
-  if (who_am_i != MPU_ADDR) {
+  if (who_am_i != MPU6050_WHOAMI_VALUE) {
     pr_err("Bad device address: 0x%X", who_am_i);
     return -1;
   } else {
@@ -345,18 +302,24 @@ static ssize_t mpu_read(struct file *filp, char __user *buf, size_t len,
   int ret;
   unsigned char test_buf;
   ret = MPU_Read_Reg(0x75, &test_buf);
-  buf[0] = test_buf;
+  if (copy_to_user(buf, &test_buf, 1)) {
+          return -EFAULT;
+      }
   return ret;
 }
 
 static ssize_t mpu_write(struct file *filp, const char *buf, size_t len,
                          loff_t *off) {
+  uint8_t kbuf[2];
   int ret;
   if (len > 2) {
     pr_err("Too many fields written: only two permitted (reg, value)");
     return -1;
   }
-  ret = MPU_Write_Reg(buf[0], buf[1]);
+  if (copy_from_user(kbuf, buf, len)) {
+          return -EFAULT;
+      }
+  ret = MPU_Write_Reg(kbuf[0], kbuf[1]);
   return ret;
 }
 
@@ -364,10 +327,10 @@ static struct i2c_driver mpu_driver = {
   .driver = {
     .name = MPU_NAME,
     .owner = THIS_MODULE,
+    .of_match_table = mpu_of_match,
   },
   .probe = mpu_probe,
   .remove = mpu_i2c_remove,
-  .id_table = mpu_id,
 };
 
 static struct file_operations mpu_fops = {
@@ -399,18 +362,8 @@ static int __init mpu_init(void) {
     pr_err("Failed to create the device");
     goto r_device;
   }
+  return i2c_add_driver(&mpu_driver);
 
-  mpu_adapter = i2c_get_adapter(I2C_BUS);
-  if (mpu_adapter != NULL) {
-    mpu_client = i2c_new_client_device(mpu_adapter, &mpu_board_info);
-    if (mpu_client != NULL) {
-      i2c_add_driver(&mpu_driver);
-    }
-  }
-  i2c_put_adapter(mpu_adapter);
-
-
-  return 0;
 r_device:
   class_destroy(dev_class);
 r_class:
@@ -419,11 +372,12 @@ r_class:
 }
 
 static void __exit mpu_exit(void) {
+  i2c_del_driver(&mpu_driver);
+
   device_destroy(dev_class, devNr);
   class_destroy(dev_class);
   unregister_chrdev_region(devNr, 1);
-  i2c_unregister_device(mpu_client);
-  i2c_del_driver(&mpu_driver);
+  
   pr_info("Driver removed\n");
 }
 
